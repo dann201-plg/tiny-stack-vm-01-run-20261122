@@ -1,3 +1,5 @@
+// Tiny stack VM (ISA v1): runs each /input/<id>/program.bin on its input.bin,
+// writes /output/<id>/stdout.bin and /output/<id>/exit.txt. Values wrap mod 2^32.
 import{readdirSync,readFileSync,writeFileSync,mkdirSync}from"node:fs";
 import{join}from"node:path";
 const I=process.env.MAKEFUN_INPUT_DIR??"/input",O=process.env.MAKEFUN_OUTPUT_DIR??"/output";
