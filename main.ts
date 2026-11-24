@@ -1,144 +1,67 @@
-// Tiny stack VM: a faithful interpreter of make.fun's tiny stack ISA v1
-// (kit: program/generator/subject/ISA.md; reference: program/generator/subject/vm.mjs).
-// For every /input/<id>/program.bin (+ input.bin) it writes /output/<id>/stdout.bin
-// and /output/<id>/exit.txt. Values are 32-bit signed; Int32Array assignment wraps.
-import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
-
-const I = process.env.MAKEFUN_INPUT_DIR ?? '/input';
-const O = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
-
-// [opcode, immediate bytes, pops, pushes]
-const OPS: [number, number, number, number][] = [
-  [0x00, 0, 0, 0], [0x01, 1, 0, 1], [0x02, 4, 0, 1], [0x03, 0, 1, 0],
-  [0x04, 0, 1, 2], [0x05, 0, 2, 2], [0x06, 0, 2, 3], [0x07, 0, 3, 3],
-  [0x10, 0, 2, 1], [0x11, 0, 2, 1], [0x12, 0, 2, 1], [0x13, 0, 2, 1],
-  [0x14, 0, 2, 1], [0x15, 0, 2, 1], [0x16, 0, 2, 1], [0x17, 0, 1, 1],
-  [0x18, 0, 2, 1], [0x19, 0, 2, 1], [0x1a, 0, 2, 1], [0x1b, 0, 1, 1],
-  [0x1c, 0, 2, 1], [0x1d, 0, 2, 1], [0x1e, 0, 2, 1], [0x20, 0, 2, 1],
-  [0x21, 0, 2, 1], [0x22, 0, 2, 1], [0x30, 2, 0, 0], [0x31, 2, 1, 0],
-  [0x32, 2, 1, 0], [0x33, 2, 0, 0], [0x34, 0, 0, 0], [0x40, 0, 1, 1],
-  [0x41, 0, 2, 0], [0x50, 0, 1, 0], [0x51, 0, 1, 0], [0x52, 0, 0, 1],
-  [0x53, 0, 1, 0],
-];
-const BY: [number, number, number][] = [];
-for (const [op, imm, pops, pushes] of OPS) BY[op] = [imm, pops, pushes];
-
-function run(p: Uint8Array, inp: Uint8Array): { out: Uint8Array; code: number } {
-  const D = new Int32Array(256);
-  let sp = 0;
-  const C = new Int32Array(64);
-  let csp = 0;
-  const M = new Int32Array(256);
-  const out = new Uint8Array(65536);
-  let ol = 0;
-  let ip = 0;
-  let pc = 0;
-  let steps = 0;
-  const n = p.length;
-  const enc = new TextEncoder();
-  const done = (code: number): { out: Uint8Array; code: number } => ({ out: out.slice(0, ol), code });
-  for (;;) {
-    if (steps === 1e6) return done(10);
-    if (pc < 0 || pc >= n) return done(9);
-    const t = BY[p[pc]];
-    if (t === undefined) return done(5);
-    const [imm, pops, pushes] = t;
-    if (pc + imm >= n) return done(9);
-    steps++;
-    const nx = pc + 1 + imm;
-    if (sp < pops) return done(2);
-    if (sp - pops + pushes > 256) return done(3);
-    const op = p[pc];
-    pc = nx;
-    switch (op) {
-      case 0x00: return done(0);
-      case 0x01: D[sp++] = (p[nx - 1] << 24) >> 24; break;
-      case 0x02: D[sp++] = p[nx - 4] | (p[nx - 3] << 8) | (p[nx - 2] << 16) | (p[nx - 1] << 24); break;
-      case 0x03: sp--; break;
-      case 0x04: D[sp] = D[sp - 1]; sp++; break;
-      case 0x05: { const x = D[sp - 1]; D[sp - 1] = D[sp - 2]; D[sp - 2] = x; break; }
-      case 0x06: D[sp] = D[sp - 2]; sp++; break;
-      case 0x07: { const a = D[sp - 3]; D[sp - 3] = D[sp - 2]; D[sp - 2] = D[sp - 1]; D[sp - 1] = a; break; }
-      case 0x17: D[sp - 1] = -D[sp - 1] | 0; break;
-      case 0x1b: D[sp - 1] = ~D[sp - 1]; break;
-      case 0x10: case 0x11: case 0x12: case 0x13: case 0x14: case 0x15: case 0x16:
-      case 0x18: case 0x19: case 0x1a: case 0x1c: case 0x1d: case 0x1e:
-      case 0x20: case 0x21: case 0x22: {
-        const b = D[sp - 1];
-        const a = D[sp - 2];
-        let r: number;
-        if (op === 0x10) r = (a + b) | 0;
-        else if (op === 0x11) r = (a - b) | 0;
-        else if (op === 0x12) r = Math.imul(a, b);
-        else if (op === 0x13) { if (b === 0) return done(4); r = a === -2147483648 && b === -1 ? a : (a / b) | 0; }
-        else if (op === 0x14) { if (b === 0) return done(4); r = b === -1 ? 0 : (a % b) | 0; }
-        else if (op === 0x15) { if (b === 0) return done(4); r = Math.floor((a >>> 0) / (b >>> 0)) | 0; }
-        else if (op === 0x16) { if (b === 0) return done(4); r = ((a >>> 0) % (b >>> 0)) | 0; }
-        else if (op === 0x18) r = a & b;
-        else if (op === 0x19) r = a | b;
-        else if (op === 0x1a) r = a ^ b;
-        else if (op === 0x1c) r = a << (b & 31);
-        else if (op === 0x1d) r = a >> (b & 31);
-        else if (op === 0x1e) r = (a >>> (b & 31)) | 0;
-        else if (op === 0x20) r = a === b ? 1 : 0;
-        else if (op === 0x21) r = a < b ? 1 : 0;
-        else r = (a >>> 0) < (b >>> 0) ? 1 : 0;
-        sp -= 2;
-        D[sp++] = r;
-        break;
-      }
-      case 0x30: case 0x31: case 0x32: {
-        const rel = ((p[nx - 2] | (p[nx - 1] << 8)) << 16) >> 16;
-        let take = true;
-        if (op !== 0x30) { const v = D[--sp]; take = op === 0x31 ? v === 0 : v !== 0; }
-        if (take) pc = nx + rel;
-        break;
-      }
-      case 0x33:
-        if (csp === 64) return done(7);
-        C[csp++] = nx;
-        pc = p[nx - 2] | (p[nx - 1] << 8);
-        break;
-      case 0x34:
-        if (csp === 0) return done(8);
-        pc = C[--csp];
-        break;
-      case 0x40: {
-        const a = D[sp - 1];
-        if (a < 0 || a >= 256) return done(6);
-        D[sp - 1] = M[a];
-        break;
-      }
-      case 0x41: {
-        const a = D[sp - 1];
-        const v = D[sp - 2];
-        if (a < 0 || a >= 256) return done(6);
-        sp -= 2;
-        M[a] = v;
-        break;
-      }
-      case 0x50: {
-        const bytes = enc.encode(String(D[sp - 1]));
-        if (ol + bytes.length > 65536) return done(11);
-        sp--;
-        out.set(bytes, ol);
-        ol += bytes.length;
-        break;
-      }
-      case 0x51:
-        if (ol + 1 > 65536) return done(11);
-        out[ol++] = D[--sp] & 255;
-        break;
-      case 0x52: D[sp++] = ip < inp.length ? inp[ip++] : -1; break;
-      case 0x53: return done(D[--sp] & 255);
-    }
-  }
+import{readdirSync,readFileSync,writeFileSync,mkdirSync}from"node:fs";
+import{join}from"node:path";
+const I=process.env.MAKEFUN_INPUT_DIR??"/input",O=process.env.MAKEFUN_OUTPUT_DIR??"/output";
+function r(p,q){
+const D=new Int32Array(256),C=new Int32Array(64),M=new Int32Array(256),o=new Uint8Array(65536);
+let s=0,c=0,l=0,i=0,pc=0,t=0;
+const n=p.length,e=new TextEncoder(),d=x=>({o:o.slice(0,l),c:x});
+for(;;){
+if(t==1e6)return d(10);
+if(pc<0||pc>=n)return d(9);
+const a=p[pc],m=a==1?1:a==2?4:a>47&&a<52?2:0;
+if(!(a<8||a>15&&a<35&&a!=31||a>47&&a<53||a>63&&a<66||a>79&&a<84))return d(5);
+if(pc+m>=n)return d(9);
+t++;
+const x=pc+1+m;
+let g=0,h=0;
+if(a==7){g=3;h=3}
+else if(a==5||a==6||a==65||a>15&&a<35&&a!=23&&a!=27){g=2;h=a==5?2:a==6?3:a==65?0:1}
+else if(a==3||a==4||a==23||a==27||a==49||a==50||a==64||a==80||a==81||a==83){g=1;h=a==4?2:a==23||a==27||a==64?1:0}
+else if(a==1||a==2||a==82)h=1;
+if(s<g)return d(2);
+if(s-g+h>256)return d(3);
+pc=x;
+switch(a){
+case 0:return d(0);
+case 1:D[s++]=(p[x-1]<<24)>>24;break;
+case 2:D[s++]=p[x-4]|p[x-3]<<8|p[x-2]<<16|p[x-1]<<24;break;
+case 3:s--;break;
+case 4:D[s]=D[s-1];s++;break;
+case 5:{const v=D[s-1];D[s-1]=D[s-2];D[s-2]=v;break}
+case 6:D[s]=D[s-2];s++;break;
+case 7:{const v=D[s-3];D[s-3]=D[s-2];D[s-2]=D[s-1];D[s-1]=v;break}
+case 23:D[s-1]=-D[s-1]|0;break;
+case 27:D[s-1]=~D[s-1];break;
+case 48:case 49:case 50:{const y=(p[x-2]|p[x-1]<<8)<<16>>16;let k=1;if(a!=48){const v=D[--s];k=a==49?v==0:v!=0}if(k)pc=x+y;break}
+case 51:if(c==64)return d(7);C[c++]=x;pc=p[x-2]|p[x-1]<<8;break;
+case 52:if(c==0)return d(8);pc=C[--c];break;
+case 64:{const v=D[s-1];if(v<0||v>255)return d(6);D[s-1]=M[v];break}
+case 65:{const v=D[s-1],w=D[s-2];if(v<0||v>255)return d(6);s-=2;M[v]=w;break}
+case 80:{const b=e.encode(String(D[s-1]));if(l+b.length>65536)return d(11);s--;o.set(b,l);l+=b.length;break}
+case 81:if(l+1>65536)return d(11);o[l++]=D[--s]&255;break;
+case 82:D[s++]=i<q.length?q[i++]:-1;break;
+case 83:return d(D[--s]&255);
+default:{
+const b=D[s-1],v=D[s-2];let z;
+if(a==16)z=(v+b)|0;
+else if(a==17)z=(v-b)|0;
+else if(a==18)z=Math.imul(v,b);
+else if(a==19){if(b==0)return d(4);z=v==-2147483648&&b==-1?v:(v/b)|0}
+else if(a==20){if(b==0)return d(4);z=b==-1?0:(v%b)|0}
+else if(a==21){if(b==0)return d(4);z=Math.floor((v>>>0)/(b>>>0))|0}
+else if(a==22){if(b==0)return d(4);z=((v>>>0)%(b>>>0))|0}
+else if(a==24)z=v&b;
+else if(a==25)z=v|b;
+else if(a==26)z=v^b;
+else if(a==28)z=v<<(b&31);
+else if(a==29)z=v>>(b&31);
+else if(a==30)z=(v>>>(b&31))|0;
+else if(a==32)z=v==b?1:0;
+else if(a==33)z=v<b?1:0;
+else z=(v>>>0)<(b>>>0)?1:0;
+s-=2;D[s++]=z;
 }
-
-for (const id of readdirSync(I).sort()) {
-  const r = run(new Uint8Array(readFileSync(join(I, id, 'program.bin'))), new Uint8Array(readFileSync(join(I, id, 'input.bin'))));
-  mkdirSync(join(O, id), { recursive: true });
-  writeFileSync(join(O, id, 'stdout.bin'), r.out);
-  writeFileSync(join(O, id, 'exit.txt'), `${r.code}\n`);
 }
+}
+}
+for(const id of readdirSync(I).sort()){const z=r(new Uint8Array(readFileSync(join(I,id,"program.bin"))),new Uint8Array(readFileSync(join(I,id,"input.bin"))));mkdirSync(join(O,id),{recursive:true});writeFileSync(join(O,id,"stdout.bin"),z.o);writeFileSync(join(O,id,"exit.txt"),z.c+"\n")}
